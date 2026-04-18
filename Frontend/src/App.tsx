@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar } from "recharts";
+import { useState, useEffect, useRef } from "react";
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 
 // ─── Tokens ────────────────────────────────────────────────────
 const C = {
@@ -22,15 +22,15 @@ const SERVERS = [
 ];
 
 const ATTACKS = [
-  { id: "ddos",  label: "DDoS",                 icon: "⚡", sev: "HIGH",   desc: "Overwhelms server with massive request floods" },
-  { id: "brute", label: "Brute Force",           icon: "🔑", sev: "MEDIUM", desc: "Repeated login attempts to crack credentials" },
-  { id: "sqli",  label: "SQL Injection",         icon: "💉", sev: "MEDIUM", desc: "Malicious SQL payloads targeting the database" },
-  { id: "priv",  label: "Privilege Escalation",  icon: "🔺", sev: "HIGH",   desc: "Attempts to gain unauthorized higher-level access" },
+  { id: "ddos",      label: "DDoS",          icon: "⚡", sev: "HIGH",   desc: "Overwhelms server with massive request floods" },
+  { id: "botnet",    label: "Botnet",        icon: "🤖", sev: "HIGH",   desc: "Coordinated attack from an infected bot network" },
+  { id: "http",      label: "HTTP Flood",    icon: "🌐", sev: "MEDIUM", desc: "Layer 7 volumetric attack on web endpoints" },
+  { id: "portscan",  label: "Port Scan",     icon: "🔍", sev: "LOW",    desc: "Reconnaissance scanning for open ports" },
 ];
 
 // ─── Log Factory ───────────────────────────────────────────────
 let _lid = 0;
-function mkLog(serverId, attackId = null) {
+function mkLog(_serverId, attackId = null) {
   const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
   const ips = ["192.168.1.4","45.33.12.87","185.220.100.1","10.0.0.23","91.108.4.0","172.16.5.9"];
   const ip = ips[Math.floor(Math.random() * ips.length)];
@@ -52,35 +52,6 @@ function mkLog(serverId, attackId = null) {
   const r = Math.random();
   if (r < 0.75) return { id: ++_lid, ts, type: "info", text: normals[Math.floor(Math.random()*normals.length)], ip };
   return { id: ++_lid, ts, type: "warn", text: warns[Math.floor(Math.random()*warns.length)], ip };
-}
-
-function mkJob(serverId, attackId, logs) {
-  const atk = ATTACKS.find(a => a.id === attackId);
-  const srv = SERVERS.find(s => s.id === serverId);
-  const conf = Math.floor(Math.random() * 12 + 86);
-  const factors = [
-    { label: "Abnormal request rate",       weight: +(Math.random()*0.2+0.78).toFixed(2) },
-    { label: "Foreign IP / geo anomaly",    weight: +(Math.random()*0.2+0.62).toFixed(2) },
-    { label: "Failed authentication spike", weight: +(Math.random()*0.2+0.50).toFixed(2) },
-    { label: "Unusual event sequence",      weight: +(Math.random()*0.2+0.35).toFixed(2) },
-  ];
-  const ips = ["185.220.100.1","45.33.12.87","91.108.4.0"];
-  return {
-    id: `JOB-${Date.now()}`,
-    serverId, serverName: srv.name, serverColor: srv.color,
-    attackId, attackLabel: atk.label, attackIcon: atk.icon,
-    severity: atk.sev,
-    confidence: conf,
-    timestamp: new Date().toISOString(),
-    status: "completed",
-    logsCount: logs.length,
-    attackLogs: logs.filter(l => l.type === "attack").length,
-    sourceIP: ips[Math.floor(Math.random() * ips.length)],
-    logs: [...logs],
-    factors,
-    timeline: Array.from({length:10},(_,i)=>({ t:`${String(i+8).padStart(2,"0")}:00`, normal: Math.floor(Math.random()*30+10), attacks: i >= 7 ? Math.floor(Math.random()*20+8) : Math.floor(Math.random()*4) })),
-    rawFeatures: { request_rate: Math.floor(Math.random()*600+200), failed_logins: Math.floor(Math.random()*30+5), bytes_transferred: `${(Math.random()*3+0.5).toFixed(1)} MB`, geo_anomaly: true, privilege_escalation: attackId==="priv"?Math.floor(Math.random()*4+1):0 },
-  };
 }
 
 // ─── Shared Nav ────────────────────────────────────────────────
@@ -115,7 +86,7 @@ function ServerCard({ server, onJobSaved }) {
   const logRef = useRef(null);
   const menuRef = useRef(null);
 
-  // background stream
+  // background log stream
   useEffect(() => {
     if (paused || simState === "running") return;
     const iv = setInterval(() => {
@@ -126,34 +97,68 @@ function ServerCard({ server, onJobSaved }) {
 
   useEffect(() => { if (!paused) logRef.current?.scrollIntoView({ behavior:"smooth" }); }, [logs, paused]);
 
-  // close menu on outside click
   useEffect(() => {
     const h = e => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
-  const simulate = useCallback(() => {
+  // ── SIMPLE simulate: click → fetch → done ─────────────────────
+  const simulate = async () => {
     if (!selectedAttack || simState === "running") return;
+    const attackId = selectedAttack.id;
     setMenuOpen(false);
     setSimState("running");
     setResult(null);
-    let count = 0;
-    const newAttackLogs = [];
-    const iv = setInterval(() => {
-      const l = mkLog(server.id, selectedAttack.id);
-      newAttackLogs.push(l);
-      setLogs(p => [...p.slice(-30), l]);
-      count++;
-      if (count >= 5) {
-        clearInterval(iv);
-        const job = mkJob(server.id, selectedAttack.id, [...logs, ...newAttackLogs]);
-        setResult(job);
-        setSimState("done");
-        onJobSaved(job);
+
+    // Add some attack logs to the terminal while we wait
+    for (let i = 0; i < 3; i++) {
+      setLogs(p => [...p.slice(-30), mkLog(server.id, attackId)]);
+    }
+
+    try {
+      const res = await fetch(`http://127.0.0.1:8000/simulate/attack?type=${attackId}`);
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const data = await res.json();
+
+      // Add a few more attack logs
+      const attackLogs = [];
+      for (let i = 0; i < 3; i++) {
+        const l = mkLog(server.id, attackId);
+        attackLogs.push(l);
+        setLogs(p => [...p.slice(-30), l]);
       }
-    }, 450);
-  }, [selectedAttack, simState, server.id, logs, onJobSaved]);
+
+      const atk = ATTACKS.find(a => a.id === attackId) || { label: "Unknown", icon: "⚠️", sev: "HIGH" };
+      const srv = SERVERS.find(s => s.id === server.id);
+      const ips = ["185.220.100.1","45.33.12.87","91.108.4.0"];
+
+      const job = {
+        id: `JOB-${Date.now()}`,
+        serverId: server.id, serverName: srv.name, serverColor: srv.color,
+        attackId, attackLabel: atk.label, attackIcon: atk.icon,
+        severity: atk.sev,
+        confidence: Math.round(data.confidence * 100),
+        timestamp: new Date().toISOString(), status: "completed",
+        logsCount: attackLogs.length + 3,
+        attackLogs: attackLogs.length + 3,
+        sourceIP: ips[Math.floor(Math.random() * ips.length)],
+        logs: attackLogs,
+        factors: data.factors,
+        timeline: Array.from({length:10},(_,i)=>({ t:`${String(i+8).padStart(2,"0")}:00`, normal:Math.floor(Math.random()*30+10), attacks:i>=7?Math.floor(Math.random()*20+8):Math.floor(Math.random()*4) })),
+        rawFeatures: data.rawFeatures,
+      };
+
+      setResult(job);
+      setSimState("done");
+      onJobSaved(job);
+    } catch (e) {
+      console.error("Simulate failed:", e);
+      alert("Could not reach backend at http://127.0.0.1:8000 — is it running?");
+      setSimState("idle");
+    }
+  };
+
 
   const logColor = t => t==="attack" ? C.err : t==="warn" ? C.warn : C.txt2;
   const logTagBg = t => t==="attack" ? C.errB : t==="warn" ? C.warnB : C.okB;
@@ -308,7 +313,7 @@ function JobsDashboard({ jobs, onSelectJob }) {
 
   const filtered = jobs
     .filter(j => (filter.server==="All" || j.serverName===filter.server) && (filter.severity==="All" || j.severity===filter.severity) && (filter.attack==="All" || j.attackId===filter.attack))
-    .sort((a,b) => sort==="newest" ? new Date(b.timestamp)-new Date(a.timestamp) : sort==="confidence" ? b.confidence-a.confidence : b.attackLogs-a.attackLogs);
+    .sort((a,b) => sort==="newest" ? +new Date(b.timestamp) - +new Date(a.timestamp) : sort==="confidence" ? b.confidence-a.confidence : b.attackLogs-a.attackLogs);
 
   const sevColor = s => s==="HIGH" ? C.err : s==="MEDIUM" ? C.warn : C.ok;
   const sevBg = s => s==="HIGH" ? C.errB : s==="MEDIUM" ? C.warnB : C.okB;
@@ -597,9 +602,9 @@ export default function App() {
   const [jobs, setJobs] = useState([]);
   const [selectedJob, setSelectedJob] = useState(null);
 
-  const handleJobSaved = useCallback((job) => {
+  const handleJobSaved = (job) => {
     setJobs(prev => [job, ...prev]);
-  }, []);
+  };
 
   const handleSelectJob = (job) => {
     setSelectedJob(job);
@@ -618,7 +623,7 @@ export default function App() {
         *{box-sizing:border-box;margin:0;padding:0}
         @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
         @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:${C.sand};border-radius:4px}
+        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:${C.bdr};border-radius:4px}
         button:active{transform:scale(.97)}
       `}</style>
       <Nav page={page==="detail"?"jobs":page} setPage={(p)=>{ setSelectedJob(null); setPage(p); }} />
